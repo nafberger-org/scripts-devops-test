@@ -1,4 +1,4 @@
-name: Jira transitions (PR opened + PR merged; Code vs SP-only)
+name: Jira transitions (appleboy; PR opened + merged; Code vs SP-only)
 
 on:
   pull_request:
@@ -9,17 +9,20 @@ permissions:
   pull-requests: read
 
 env:
-  # ---- EDIT THESE 4 LINES ONLY ----
-  # When PR OPENED / UPDATED:
+  # ---- EDIT THESE 4 LINES ----
   TRANSITION_OPENED_CODE: "In Review"              # A
   TRANSITION_OPENED_SP:   "In QA"                  # B
-  # When PR MERGED:
   TRANSITION_MERGED_CODE: "Awaiting Publish"       # C
   TRANSITION_MERGED_SP:   "Done"                   # D
-  # ---------------------------------
-  # Treat these as SP (stored-procedure) locations/extensions:
-  SP_DIRS_CSV: "db,database,stored-procedures,sql"
-  SP_EXTS_CSV: ".sql,.psql"
+  # ----------------------------
+
+  # folders/extensions treated as "stored procedures"
+  SP_DIRS: |
+    db/**
+    database/**
+    stored-procedures/**
+    sql/**
+  SP_EXTS: "*.sql"
 
 jobs:
   jira:
@@ -27,111 +30,70 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
 
-      # Classify changed files: SP-only vs Code
-      - id: classify
-        run: |
-          # Collect changed files for this PR via GitHub API
-          gh_files=$(curl -sS -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
-            | jq -r '.[].filename')
-
-          # If nothing found (edge case), call it code
-          if [ -z "$gh_files" ]; then
-            echo "sp=false" >> $GITHUB_OUTPUT
-            echo "code=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          IFS=',' read -ra SPDIRS <<< "${{ env.SP_DIRS_CSV }}"
-          IFS=',' read -ra EXT <<< "${{ env.SP_EXTS_CSV }}"
-
-          is_sp_file() {
-            f="$1"; f_lc="${f,,}"
-            in_dir="false"
-            for d in "${SPDIRS[@]}"; do
-              case "$f" in
-                "$d"/*) in_dir="true"; break;;
-              esac
-            done
-            [ "$in_dir" != "true" ] && return 1
-            for e in "${EXT[@]}"; do
-              [[ "$f_lc" == *"$e" ]] && return 0
-            done
-            return 1
-          }
-
-          sp_only="true"
-          while IFS= read -r f; do
-            if ! is_sp_file "$f"; then sp_only="false"; break; fi
-          done <<< "$gh_files"
-
-          if [ "$sp_only" = "true" ]; then
-            echo "sp=true"  >> $GITHUB_OUTPUT
-            echo "code=false" >> $GITHUB_OUTPUT
-          else
-            echo "sp=false" >> $GITHUB_OUTPUT
-            echo "code=true" >> $GITHUB_OUTPUT
-          fi
-
-      # Find Jira issues mentioned in PR (title/body/branch/commits)
-      - id: find
-        uses: atlassian/gajira-find-issues@v3
+      # SP-only vs Code (SP files changed exclusively?)
+      - id: pf
+        uses: dorny/paths-filter@v3
         with:
-          from: 'title,body,commits,branch'
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          filters: |
+            sp_only:
+              - '${{ env.SP_DIRS }}'
+              - '${{ env.SP_EXTS }}'
+              - '!**/*'   # dummy line to allow multi-globs above
+            code_any:
+              - '**/*'
+              - '!${{ env.SP_DIRS }}'
+              - '!${{ env.SP_EXTS }}'
 
-      # ---------- PR OPENED / UPDATED ----------
-      - name: Transition (PR opened → CODE)
-        if: github.event.action != 'closed' && steps.classify.outputs.code == 'true' && steps.find.outputs.issues != ''
-        uses: atlassian/gajira-transition@v3
+      # ---- PR OPENED / UPDATED ----
+      - name: PR opened → CODE transition
+        if: github.event.action != 'closed' && steps.pf.outputs.code_any == 'true' && steps.pf.outputs.sp_only != 'true'
+        uses: appleboy/jira-action@v0.3.0
         with:
-          issues: ${{ steps.find.outputs.issues }}
+          base_url: ${{ secrets.JIRA_BASE_URL }}    # e.g. https://nafberger.atlassian.net or your DC URL
+          # pick ONE auth style:
+          # token: ${{ secrets.JIRA_TOKEN }}        # Jira Data Center PAT (preferred for DC)
+          username: ${{ secrets.JIRA_USER_EMAIL }}  # Jira Cloud/Basic auth
+          password: ${{ secrets.JIRA_API_TOKEN }}   # Jira Cloud API token
+          # string to scan for keys like ABC-123:
+          ref: "${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }} ${{ github.event.pull_request.head.ref }}"
           transition: ${{ env.TRANSITION_OPENED_CODE }}
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      - name: Transition (PR opened → SP-only)
-        if: github.event.action != 'closed' && steps.classify.outputs.sp == 'true' && steps.find.outputs.issues != ''
-        uses: atlassian/gajira-transition@v3
+      - name: PR opened → SP-only transition
+        if: github.event.action != 'closed' && steps.pf.outputs.sp_only == 'true'
+        uses: appleboy/jira-action@v0.3.0
         with:
-          issues: ${{ steps.find.outputs.issues }}
+          base_url: ${{ secrets.JIRA_BASE_URL }}
+          # token: ${{ secrets.JIRA_TOKEN }}        # for Jira DC PAT
+          username: ${{ secrets.JIRA_USER_EMAIL }}  # for Jira Cloud basic auth
+          password: ${{ secrets.JIRA_API_TOKEN }}   # for Jira Cloud basic auth
+          ref: "${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }} ${{ github.event.pull_request.head.ref }}"
           transition: ${{ env.TRANSITION_OPENED_SP }}
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # ---------- PR MERGED ----------
-      - name: Transition (PR merged → CODE)
-        if: github.event.action == 'closed' && github.event.pull_request.merged == true && steps.classify.outputs.code == 'true' && steps.find.outputs.issues != ''
-        uses: atlassian/gajira-transition@v3
+      # ---- PR MERGED ----
+      - name: PR merged → CODE transition
+        if: github.event.action == 'closed' && github.event.pull_request.merged == true && steps.pf.outputs.code_any == 'true' && steps.pf.outputs.sp_only != 'true'
+        uses: appleboy/jira-action@v0.3.0
         with:
-          issues: ${{ steps.find.outputs.issues }}
+          base_url: ${{ secrets.JIRA_BASE_URL }}
+          # token: ${{ secrets.JIRA_TOKEN }}
+          username: ${{ secrets.JIRA_USER_EMAIL }}
+          password: ${{ secrets.JIRA_API_TOKEN }}
+          ref: "${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }} ${{ github.event.pull_request.head.ref }}"
           transition: ${{ env.TRANSITION_MERGED_CODE }}
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      - name: Transition (PR merged → SP-only)
-        if: github.event.action == 'closed' && github.event.pull_request.merged == true && steps.classify.outputs.sp == 'true' && steps.find.outputs.issues != ''
-        uses: atlassian/gajira-transition@v3
+      - name: PR merged → SP-only transition
+        if: github.event.action == 'closed' && github.event.pull_request.merged == true && steps.pf.outputs.sp_only == 'true'
+        uses: appleboy/jira-action@v0.3.0
         with:
-          issues: ${{ steps.find.outputs.issues }}
+          base_url: ${{ secrets.JIRA_BASE_URL }}
+          # token: ${{ secrets.JIRA_TOKEN }}
+          username: ${{ secrets.JIRA_USER_EMAIL }}
+          password: ${{ secrets.JIRA_API_TOKEN }}
+          ref: "${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }} ${{ github.event.pull_request.head.ref }}"
           transition: ${{ env.TRANSITION_MERGED_SP }}
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
+      # Nice one-page summary in the run
       - name: Job summary
         if: always()
         run: |
@@ -139,6 +101,6 @@ jobs:
             echo "### Jira Transition Summary"
             echo "- PR: ${{ github.event.pull_request.html_url }}"
             echo "- Action: ${{ github.event.action }} (merged=${{ github.event.pull_request.merged }})"
-            echo "- Classified: SP=${{ steps.classify.outputs.sp }} CODE=${{ steps.classify.outputs.code }}"
-            echo "- Jira issues: \`${{ steps.find.outputs.issues }}\`"
+            echo "- SP-only: ${{ steps.pf.outputs.sp_only }} | Code-any: ${{ steps.pf.outputs.code_any }}"
+            echo "- Transitions (opened code/SP, merged code/SP): \`${{ env.TRANSITION_OPENED_CODE }}\`, \`${{ env.TRANSITION_OPENED_SP }}\`, \`${{ env.TRANSITION_MERGED_CODE }}\`, \`${{ env.TRANSITION_MERGED_SP }}\`"
           } >> $GITHUB_STEP_SUMMARY
