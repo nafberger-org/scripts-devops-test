@@ -1,0 +1,95 @@
+name: Deploy ASP.NET MVC to Azure VM
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Git branch to build/deploy'
+        required: true
+        type: string
+      webapp_name:
+        description: 'IIS site/app pool name'
+        required: false
+        type: string
+        default: 'SimpleWebFormsTest'
+      package_path:
+        description: 'Path to build output folder'
+        required: false
+        type: string
+        default: './publish'
+      deployment_path:
+        description: 'IIS physical path'
+        required: false
+        type: string
+        default: 'C:\inetpub\wwwroot\SimpleWebFormsTest'
+      website_port:
+        description: 'IIS port'
+        required: false
+        type: string
+        default: '8080'
+      app_pool_dotnet_version:
+        description: '.NET version for app pool'
+        required: false
+        type: string
+        default: 'v4.0'
+  
+env:
+  WEBAPP_NAME: ${{ inputs.webapp_name }}
+  WEBAPP_PACKAGE_PATH: ${{ inputs.package_path }}
+  DEPLOYMENT_PATH: ${{ inputs.deployment_path }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.branch }}
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+      
+    - name: Restore NuGet packages
+      run: nuget restore TestWeb.sln
+      
+    - name: Build and publish MVC application
+      run: |
+        msbuild TestWeb.sln /p:Configuration=Release /p:Platform="Any CPU" ^
+          /p:DeployOnBuild=true ^
+          /p:WebPublishMethod=FileSystem ^
+          /p:PublishUrl="$(System.DefaultWorkingDirectory)\publish" ^
+          /p:DeleteExistingFiles=true
+      
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: webapp-package
+        path: publish
+        retention-days: 30
+        
+  deploy:
+    runs-on: self-hosted
+    needs: build
+    environment: production
+    
+    steps:
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: webapp-package
+        path: ${{ env.WEBAPP_PACKAGE_PATH }}
+        
+    - name: Deploy to IIS
+      uses: microsoft/iis-deploy@v1
+      with:
+        website-name: ${{ env.WEBAPP_NAME }}
+        app-pool-name: ${{ env.WEBAPP_NAME }}
+        package-path: ${{ env.WEBAPP_PACKAGE_PATH }}
+        website-physical-path: ${{ env.DEPLOYMENT_PATH }}
+        app-pool-dotnet-version: 'v4.0'
+        website-port: '8080'
