@@ -1,0 +1,14 @@
+# .github/workflows/staging-approval-test.yml
+name: Staging Approval Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment:
+      name: staging   # must match your Environment name in repo settings
+    steps:
+      - name: Show message
+        run: echo "Deploying to staging..."
